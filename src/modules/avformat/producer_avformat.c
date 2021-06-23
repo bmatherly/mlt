@@ -131,6 +131,7 @@ struct producer_avformat_s
 	int autorotate;
 	int is_audio_synchronizing;
 	int video_send_result;
+	int unexpected_error_count;
 #if USE_HWACCEL
 	struct {
 		int pix_fmt;
@@ -1633,8 +1634,23 @@ static int allocate_buffer( mlt_frame frame, AVCodecParameters *codec_params, ui
 	return size;
 }
 
-static int ignore_send_packet_result(int result)
+static int ignore_send_packet_result(producer_avformat self, int result)
 {
+	// First, look for unexpected errors which can be ignored in low numbers
+	if ( result == AVERROR(EINVAL) )
+	{
+		self->unexpected_error_count++;
+		if ( self->unexpected_error_count <= 5 )
+		{
+			return 1;
+		}
+		else
+		{
+			return 0;
+		}
+	}
+	self->unexpected_error_count = 0;
+	// Then check for normal errors which can always be ignored
 	return result >= 0 || result == AVERROR(EAGAIN) || result == AVERROR_EOF || result == AVERROR_INVALIDDATA;
 }
 
@@ -1808,7 +1824,7 @@ static int producer_get_image( mlt_frame frame, uint8_t **buffer, mlt_image_form
 		else
 			av_frame_unref( self->video_frame );
 
-		while (!got_picture && ignore_send_packet_result(self->video_send_result))
+		while (!got_picture && ignore_send_packet_result(self, self->video_send_result))
 		{
 			if ( self->video_send_result != AVERROR( EAGAIN ) )
 			{
@@ -1903,7 +1919,7 @@ static int producer_get_image( mlt_frame frame, uint8_t **buffer, mlt_image_form
 					self->video_send_result = avcodec_send_packet( codec_context, &self->pkt );
 					mlt_log_debug( MLT_PRODUCER_SERVICE( producer ), "decoded video packet with size %d => %d\n", self->pkt.size, self->video_send_result );
 					// Note: decode may fail at the beginning of MPEGfile (B-frames referencing before first I-frame), so allow a few errors.
-					if (!ignore_send_packet_result(self->video_send_result))
+					if (!ignore_send_packet_result(self, self->video_send_result))
 					{
 						mlt_log_warning( MLT_PRODUCER_SERVICE( producer ), "video avcodec_send_packet failed with %d\n", self->video_send_result );
 					}
@@ -2563,7 +2579,7 @@ static int decode_audio( producer_avformat self, int *ignore, const AVPacket *pk
 		av_frame_unref( self->audio_frame );
 	int error = avcodec_send_packet(codec_context, pkt);
 	mlt_log_debug(MLT_PRODUCER_SERVICE(self->parent), "decoded audio packet with size %d => %d\n", pkt->size, error);
-	if (!ignore_send_packet_result(error)) {
+	if (!ignore_send_packet_result(self, error)) {
 		mlt_log_warning(MLT_PRODUCER_SERVICE(self->parent), "audio avcodec_send_packet failed with %d\n", error);
 	} else while (!error) {
 		error = avcodec_receive_frame(codec_context, self->audio_frame);
